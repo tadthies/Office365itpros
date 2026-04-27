@@ -3,20 +3,20 @@
 #
 # V1.0 27-Mar-2020
 # V2.0 17-Feb-2024 Updated for the Graph SDK
-# https://github.com/12Knocksinna/Office365itpros/blob/master/ReportSPOSiteStorageUsedGraph.PS1
+# GitHub Link: https://github.com/12Knocksinna/Office365itpros/blob/master/ReportSPOSiteStorageUsedGraph.PS1
 
 Clear-Host
 
 Connect-MgGraph -NoWelcome -Scopes Reports.Read.All, Directory.Read.All
 $ObscureFlag = $false
 $TempDownloadFile = "c:\temp\x.csv"
-
+  
 # Check if the tenant has obscured real names for reports - see https://office365itpros.com/2022/09/09/graph-usage-report-tips/
-$DisplaySettings = Invoke-MgGraphRequest -Method Get -Uri 'https://graph.microsoft.com/beta/admin/reportSettings'
+$DisplaySettings = Invoke-MgGraphRequest -Method Get -Uri 'https://graph.microsoft.com/V1.0/admin/reportSettings'
 If ($DisplaySettings['displayConcealedNames'] -eq $true) { # data is obscured, so let's reset it to allow the report to run
    $ObscureFlag = $true
    Write-Host "Setting tenant data concealment for reports to False" -foregroundcolor red
-   Invoke-MgGraphRequest -Method PATCH -Uri 'https://graph.microsoft.com/beta/admin/reportSettings' `
+   Invoke-MgGraphRequest -Method PATCH -Uri 'https://graph.microsoft.com/V1.0/admin/reportSettings' `
     -Body (@{"displayConcealedNames"= $false} | ConvertTo-Json) 
 }
 
@@ -28,6 +28,9 @@ Write-Host "Fetching SharePoint Online site data from the Graph..."
 $URI = "https://graph.microsoft.com/v1.0/reports/getSharePointSiteUsageDetail(period='D180')"
 Invoke-MgGraphRequest -Uri $Uri -Method GET -OutputFilePath $TempDownloadFile
 [array]$Sites = Import-CSV $TempDownloadFile
+
+# Remove redirect sites. These are not really sites, but just placeholders that point to the real site, and they don't have any activity or storage usage themselves, so we can remove them from the report. Comment this out if you want to include the redirect sites in the report.
+$Sites = $Sites | Where-Object {$_.Template -ne "REDIRECTSITE#0"}
 
 $TotalSPOStorageUsed = [Math]::Round(($Sites."Storage Used (Byte)" | Measure-Object -Sum).Sum /1GB,2)
 $Report = [System.Collections.Generic.List[Object]]::new() 
@@ -69,7 +72,7 @@ If ($Site."Root Web Template" -notin $SiteTypesToReport) {
 # Switch the tenant report obscure data setting back if necessary
 If ($ObscureFlag -eq $True) {
   Write-Host "Resetting tenant data concealment for reports to True" -foregroundcolor red
-  Invoke-MgGraphRequest -Method PATCH -Uri 'https://graph.microsoft.com/beta/admin/reportSettings' `
+  Invoke-MgGraphRequest -Method PATCH -Uri 'https://graph.microsoft.com/V1.0/admin/reportSettings' `
    -Body (@{"displayConcealedNames"= $true} | ConvertTo-Json) 
 }
 

@@ -1010,3 +1010,827 @@ Do {
     }
 } While ($i -lt 500)
 
+
+# Disable the People, Files, and Calendar Microsoft 365 Companion Apps from starting automatically
+$RegistryKey = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData\Microsoft.M365Companions_8wekyb3d8bbwe"
+[array]$AppStartUpIds = @("$RegistryKey\CalendarStartupId","$RegistryKey\FilesStartupId","$RegistryKey\PeopleStartupId")
+
+ForEach ($AppStartupId in $AppStartUpIds) {
+    Try {
+        If (Test-Path $AppStartupId) {
+            # Disable startup state for the app
+            Write-Host ("Disabling startup state for the {0} companion app" -f $AppStartupId.Split("StartupId")[0].Split("\")[11]) -ForegroundColor Green
+            Set-ItemProperty -Path $AppStartupId -Name "State" -Value 1 -Type DWORD -ErrorAction Stop
+        } Else {
+            Write-Host ("Couldn't find path to disable startup for the {0} companion app" -f $AppStartupId.Split("StartupId")[0].Split("\")[11]) -ForegroundColor Red
+        }
+    } Catch {
+        Write-Error ("Failed to set State for {0} : {1}" -f $AppStartupId, $_)  
+    }
+}
+Write-Host "Completed suppressing the startup of the Calendar, Files, and People companion apps"
+
+#- Search for audit records for Researcher Copilot agent
+
+[array]$Records = Search-UnifiedAuditLog -StartDate (Get-Date).AddDays(-90) -EndDate (Get-Date) `
+    -Formatted -Operations "CopilotInteraction" -ResultSize 5000 -SessionCommand ReturnLargeSet
+If ($Records) {
+    $Records = $records | Sort-Object Identity -Unique  
+    Write-Host ("{0} audit records found" -f $Records.Count)
+    $Records = $Records | Sort-Object { $_.CreationDate -as [datetime]} -Descending
+} Else {
+    Write-Host "No audit records found - now scanning for Researcher Copilot agent records"
+    Break
+}   
+
+$ResearcherReport = [System.Collections.Generic.List[Object]]::new()
+ForEach ($Rec in $Records) {    
+    $AuditData = $Rec.AuditData | ConvertFrom-Json
+    If ($AuditData.AgentName -ne "Researcher") {
+        Continue
+    }
+    [array]$CopilotResources = $AuditData.CopilotEventData.AccessedResources
+    If ($CopilotResources) {
+        $Resources = [System.Collections.Generic.List[Object]]::new()
+        ForEach ($Resource in $CopilotResources) {
+            If ($Resource.Action) {
+                If ($Resource.SiteURL) {
+                    $ResourceName = $Resource.SiteURL
+                    $ResourceId  = $null
+                } Else {
+                    $ResourceName = $Resource.Name
+                    $ResourceId   = $Resource.Id.Split("&")[0]
+                }
+                $ResourcesAccessed =  [PSCustomObject][Ordered]@{
+                    Action = $Resource.Action
+                    Name   = $ResourceName
+                    Id     = $ResourceId
+                }
+                $Resources.Add($ResourcesAccessed)
+            }   
+        }
+        $ReportLine = [PSCustomObject][Ordered]@{
+            TimeStamp       = Get-Date ($AuditData.CreationTime) -format 'dd-MMM-yyyy HH:mm'
+            User            = $AuditData.UserId
+            Action          = $AuditData.Operation
+            Resources       = $Resources.Name -join "; "
+        }
+        $ResearcherReport.Add($ReportLine)
+        } Else {
+            If ($null -ne $AuditData.CopilotEventData.Messages) {
+                $ReportLine = [PSCustomObject][Ordered]@{
+                    TimeStamp       = Get-Date ($AuditData.CreationTime) -format 'dd-MMM-yyyy HH:mm'
+                    User            = $AuditData.UserId
+                    Action          = $AuditData.Operation
+                    Resources       = If ($AuditData.CopilotEventData.Messages.count -le 3) {$AuditData.CopilotEventData.Messages.Count}                                     
+                                       Else {$AuditData.CopilotEventData.Messages.count.toString() + " (likely use of Claude LLM)"}
+                }
+                $ResearcherReport.Add($ReportLine)
+            }
+        }
+}
+
+[array]$Invitations = Get-MgAuditLogDirectoryAudit -All -Filter "activityDisplayName eq 'Invite external user to organization'" 
+If ($Invitations) {
+    Write-Host ("{0} invitation audit records found" -f $Invitations.Count)
+} Else {
+    Write-Host "No invitation audit records found"  
+}
+ForEach ($Invitation in $Invitations) {
+    $Inviter = $Invitation.InitiatedBy.User.UserPrincipalName 
+    $Invitee = $Invitation.TargetResources[0].DisplayName
+    $InviteeUPN = $Invitation.TargetResources[0].UserPrincipalName 
+    $InviteeID = $Invitation.TargetResources[0].Id
+    $InvitationDate = Get-Date $Invitation.ActivityDateTime -Format 'dd-MMM-yyyy HH:mm'
+
+    Write-Host ("{0} invited {1} ({2}) on {3}" -f $Inviter, $Invitee, $InviteeUPN, $InvitationDate)
+}
+
+
+
+
+
+<# 
+.SYNOPSIS
+  Export EnforcedTimestamps for all mailboxes with numeric EventType -> friendly name mapping.
+
+.REQUIREMENTS
+  - Exchange Online Management module (EXO v2+)
+  - Permissions: Exchange Administrator (or equivalent)
+
+.OUTPUT
+  - CSV file in current directory: EnforcedTimestamps_<yyyyMMdd_HHmmss>.csv
+#>
+
+# --- 1) Connect to Exchange Online (comment out if you are already connected) ---
+try {
+    # If you use MFA, omit -UserPrincipalName and sign in interactively
+    Connect-ExchangeOnline -ShowBanner:$false | Out-Null
+} catch {
+    Write-Warning "Could not connect to Exchange Online. If already connected, you can ignore this warning."
+}
+
+
+# --- 6) Optional: summary on screen ---
+$export |
+  Group-Object EventTypeName |
+  Sort-Object Count -Descending |
+  Format-Table Name, Count
+``
+$Uri = "https://graph.microsoft.com/v1.0/security/alerts_v2?`$filter=serviceSource eq 'DataLossPrevention'&`$orderby=createdDateTime desc&`$top=200"
+[array]$Alerts = Invoke-MgGraphRequest -Method GET -Uri $Uri
+
+[array]$DLPAlerts = Get-MgSecurityAlertV2 -Filter "serviceSource eq 'dataLossPrevention'" -PageSize 500 -All -Sort "CreatedDateTime Desc"
+
+$Report = [System.Collections.Generic.List[Object]]::new()
+ForEach ($Alert in $DLPAlerts) {   
+    If ($Alert.LastUpdateDateTime) { $LastUpdated = Get-Date $Alert.LastUpdateDateTime -Format 'dd-MMM-yyyy HH:mm' 
+    } Else { 
+        $LastUpdated = "N/A" 
+    }
+    $ReportLine = [PSCustomObject][Ordered]@{
+        Id                  = $Alert.id
+        Title               = $Alert.title
+        CreatedDateTime     = Get-Date $Alert.createdDateTime -Format 'dd-MMM-yyyy HH:mm'
+        Severity            = $Alert.severity
+        Status              = $Alert.status
+        Category            = $Alert.category
+        AssignedTo          = $Alert.AssignedTo
+        LastUpdateDateTime  = $LastUpdated
+        Classification      = $Alert.classification
+    } 
+    $Report.Add($ReportLine)
+}
+
+# Report SharePoint RCD Audit Events
+[array]$Operations = "RestrictContentOrgWideSearchDisabled", "RestrictContentOrgWideSearchEnabled", "SharePointRCDUpdateJustification"
+[array]$Records = Search-UnifiedAuditLog -StartDate (Get-Date).AddDays(-1) -EndDate (Get-Date) -Formatted `
+    -SessionCommand ReturnLargeSet -ResultSize 5000 -Operations $Operations
+$Records = $Records | Sort-Object Identity -Unique
+
+$Report = [System.Collections.Generic.List[Object]]::new()
+ForEach ($Rec in $Records) {
+    $AuditData = $Rec.AuditData | ConvertFrom-Json
+ 
+    Switch ($AuditData.Operation) {
+        "RestrictContentOrgWideSearchEnabled" {
+            $Action = ("Enabled RCD for {0}" -f $AuditData.ObjectId)
+        }
+        "SharePointRCDUpdateJustification" {
+            $Action = ("RCD Justification: {0}" -f $AuditData.RCDJustification)
+        }
+        "RestrictContentOrgWideSearchDisabled" {
+            $Action = ("Disabled RCD for {0}" -f $AuditData.ObjectId)
+        }
+        Default {
+            $Action = $AuditData.Operation
+        }
+    }
+    $ReportLine = [PSCustomObject][Ordered]@{
+        TimeStamp       = Get-Date ($AuditData.CreationTime) -format 'dd-MMM-yyyy HH:mm'
+        User            = $AuditData.UserId
+        Action          = $AuditData.Operation
+        SiteURL         = $AuditData.ObjectId
+        EventInfo       = $Action
+
+    }
+    $Report.Add($ReportLine)
+}
+$Report = $Report | Sort-Object {$_.TimeStamp -as [datetime]} -Descending
+$Report | Out-GridView -Title "Restricted Content Discovery Audit Records"
+
+# Create a calendar event in a Teams channel calendar
+
+# Get identifiers for the target team (group) and channel
+$GroupId = Get-MgGroup -Filter "displayName eq 'Microsoft Graph Gurus'" | Select-Object -ExpandProperty Id
+$ChannelId = Get-MgTeamChannel -TeamId $GroupId -Filter "displayName eq 'General'" | Select-Object -ExpandProperty Id
+
+# Define event details
+$EventDetails = @{}
+$EventDetails.Add("subject", "Team Channel Meeting")
+$EventBody = @{}
+$EventBody.Add("contentType", "HTML")   
+$EventBody.Add("content", "This is a meeting scheduled in the Teams channel calendar.")
+$EventDetails.Add("body", $EventBody)       
+$EventStart = @{}
+$EventStart.Add("dateTime", "2026-01-15T10:00")
+$EventStart.Add("timeZone", "UTC")
+$EventDetails.Add("start", $EventStart)
+$EventEnd = @{}         
+$EventEnd.Add("dateTime", "2026-01-15T11:00")
+$EventEnd.Add("timeZone", "UTC")
+$EventDetails.Add("end", $EventEnd)
+$EventLocation = @{}
+$EventLocation.Add("displayName", "Teams Channel Meeting")
+$EventDetails.Add("location", $EventLocation)
+$EventDetails.Add("isOnlineMeeting", $true)
+$EventDetails.Add("onlineMeetingProvider", "teamsForBusiness")  
+$EventChannel = @{}
+$EventChannel.Add("teamId", $GroupId)       
+$EventChannel.Add("channelid", $ChannelId)
+$EventDetails.Add("channelIdentity", $EventChannel)
+
+# URI to create event in channel calendar
+$Uri = ("https://graph.microsoft.com/v1.0/groups/{0}/calendar/events" -f $GroupId)
+$NewEvent = Invoke-MgGraphRequest -Method POST -Uri $Uri -Body $EventDetails
+
+# Client side filter for mailbox items by size
+
+
+# PR_MESSAGE_SIZE
+$SizePropId = "Integer 0x0e08"
+# Size threshold
+$Threshold = 0.5MB   
+# Date range (example: last 30 days)
+$since = (Get-Date).AddDays(-30).ToString('s') + "Z"
+
+# Server-side filter - find messages with attachments received since $since
+$filter = "hasAttachments eq true and receivedDateTime ge $since"
+
+[array]$Messages = Get-MgUserMailFolderMessage -UserId $User.Id -MailFolderId 'Inbox' `
+    -Filter $filter -All -Select id,subject,sender,receivedDateTime `
+    -ExpandProperty "singleValueExtendedProperties(`$filter=id eq '$SizePropId')"
+
+$Report = [System.Collections.Generic.List[Object]]::new()
+# Client-side size check
+$Messages | ForEach-Object {
+    $Size = [int64]$_.SingleValueExtendedProperties[0].Value
+    If ($Size -gt $Threshold) {
+        $ReportLine = [PSCustomObject][Ordered]@{
+            Subject          = $_.Subject
+            From             = $_.Sender.EmailAddress.Address
+            ReceivedDateTime = $_.ReceivedDateTime
+            SizeMB           = [math]::Round($size / 1MB, 2)
+            Id               = $_.Id
+        }
+        $Report.Add($ReportLine)
+    }
+}
+    
+$Report | Sort-Object SizeMB -Descending | Out-GridView -Title "Large Emails in Inbox over $($Threshold / 1MB) MB"
+
+$ScopeName = "Permanent Employees”
+$Membership = Get-AdaptiveScopeMembers -Identity $ScopeName -ErrorAction SilentlyContinue
+If (!($Membership)) {
+  Write-Output ("No members found for {0} scope" -f $ScopeName )
+} Else { 
+  Write-Output ("{0} members found in {1} scope" -f $Membership.count, $ScopeName)
+}
+
+$DateString = "04/22/2022 21:36:39 +00:00"
+$ParsedDate = [DateTime]::ParseExact($DateString, "MM/dd/yyyy HH:mm:ss zzz", [System.Globalization.CultureInfo]::InvariantCulture)
+Write-Host $ParsedDate
+
+
+# UserConfiguration FAI Items in ueer mailboxes
+
+$User = (Get-MgContext).Account
+$UserId = (Get-MgUser -UserId $User).Id
+
+# Calendar work hours
+$Uri = ("https://graph.microsoft.com/beta/users/{0}/mailFolders/Calendar/userConfigurations/WorkHours" -f $UserId)
+[array]$Data = Invoke-MgGraphRequest -URI $Uri -Method Get -OutputType PSObject
+[string]$Base64Convert = [Text.Encoding]::Utf8.GetString([Convert]::FromBase64String($Data.xmldata))
+
+# Parse calendar settings from the XML data
+[xml]$doc = $Base64Convert
+
+$ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+$ns.AddNamespace('w','WorkingHours.xsd')
+
+$root = $doc.SelectSingleNode('//w:WorkHoursVersion1',$ns)
+
+$tz = $root.SelectSingleNode('w:TimeZone',$ns)
+$tzName = $tz.SelectSingleNode('w:Name',$ns).InnerText
+$tzBias = [int]$tz.SelectSingleNode('w:Bias',$ns).InnerText
+
+$std = $tz.SelectSingleNode('w:Standard',$ns)
+$stdBias = [int]$std.SelectSingleNode('w:Bias',$ns).InnerText
+$stdChange = $std.SelectSingleNode('w:ChangeDate',$ns)
+$stdChangeDate = $stdChange.SelectSingleNode('w:Date',$ns).InnerText
+$stdChangeTime = $stdChange.SelectSingleNode('w:Time',$ns).InnerText
+$stdChangeDayOfWeek = $stdChange.SelectSingleNode('w:DayOfWeek',$ns).InnerText
+
+$dst = $tz.SelectSingleNode('w:DaylightSavings',$ns)
+$dstBias = [int]$dst.SelectSingleNode('w:Bias',$ns).InnerText
+$dstChange = $dst.SelectSingleNode('w:ChangeDate',$ns)
+$dstChangeDate = $dstChange.SelectSingleNode('w:Date',$ns).InnerText
+$dstChangeTime = $dstChange.SelectSingleNode('w:Time',$ns).InnerText
+$dstChangeDayOfWeek = $dstChange.SelectSingleNode('w:DayOfWeek',$ns).InnerText
+
+$timeslot = $root.SelectSingleNode('w:TimeSlot',$ns)
+$start = $timeslot.SelectSingleNode('w:Start',$ns).InnerText
+$end = $timeslot.SelectSingleNode('w:End',$ns).InnerText
+
+$workdays = $root.SelectSingleNode('w:WorkDays',$ns).InnerText
+
+$CalendarOptions = [PSCustomObject]@{
+    TimeZoneName            = $tzName
+    TimeZoneBiasMinutes     = $tzBias
+    StandardBiasMinutes     = $stdBias
+    StandardChangeDate      = $stdChangeDate
+    StandardChangeTime      = $stdChangeTime
+    StandardChangeDayOfWeek = $stdChangeDayOfWeek
+    DaylightBiasMinutes     = $dstBias
+    DaylightChangeDate      = $dstChangeDate
+    DaylightChangeTime      = $dstChangeTime
+    DaylightChangeDayOfWeek = $dstChangeDayOfWeek
+    WorkStart               = $start
+    WorkEnd                 = $end
+    WorkDays                = $workdays
+}
+
+# Calendar options
+$Uri = ("https://graph.microsoft.com/beta/users/{0}/mailFolders/Calendar/userConfigurations/Calendar" -f $UserId)
+[array]$Data = Invoke-MgGraphRequest -URI $Uri -OutputType PsObject | Select-Object -ExpandProperty structuredData
+
+ForEach ($Setting in $Data) {
+    [string]$SettingName = $Setting.keyEntry.values
+    [string]$SettingValue = $Setting.valueEntry.values
+    Write-Host ("{0} : {1}" -f $SettingName, $SettingValue)
+}
+
+[array]$USAiports = "PHL", "SFO", "JFK", "BOS", "LAX", "ORD", "ATL", "DFW", "DEN", "SEA", "MCO", "LAS", "EWR", "IAD", "MIA"
+
+[array]$Memory = Import-CSV FlightMemory.csv
+$Report = [System.Collections.Generic.List[Object]]::new()
+ForEach ($Record in $Memory) {
+   # $ConvertedDate = [DateTime]::ParseExact($Record.Date, "MM-dd-yyyy", [System.Globalization.CultureInfo]::InvariantCulture)
+    $AirLineId = $null; $AircraftId = $null
+    [datetime]$Departure = Get-Date $Record.'Gate Departure (Actual)' 
+    [datetime]$Arrival = Get-Date $Record.'Gate Arrival (Actual)'
+    $Duration = New-TimeSpan -Start $Record.'Gate Departure (Actual)' -End $Record.'Gate Arrival (Actual)'
+    Switch ($Record.'Cabin Class') {
+        "Economy" {      
+            $FlightClass = "1"
+        }
+        "Premium Economy" {
+            $FlightClass = "4"
+        }   
+        "Business" {
+            $FlightClass = "2"
+        }   
+        "First" {
+            $FlightClass = "4"
+        }
+        "Private" {
+            $FlightClass = "5"  
+        }
+         Default {
+            $FlightClass = "1"
+        }
+    }
+    Switch ($Record.'Seat Type') {
+        "Window" {      
+            $SeatType = "1"
+        }
+        "Middle" {
+            $SeatType = "2"
+        }
+        "Aisle" {
+            $SeatType = "3"
+        }
+        "Crew" {
+            $SeatType = "0"
+        }
+        Default {
+            $SeatType = "1"
+        }
+    }
+    Switch ($Record.'Flight Reason') {
+        "Business" {      
+            $FlightReason = "2"
+        }
+        "Leisure" {
+            $FlightReason = "1"
+        }
+        "Family" {
+            $FlightReason = "3"
+        }
+        "Other" {
+            $FlightReason = "4"
+        }
+        Default {
+            $FlightReason = "1"
+        }
+    }
+    Switch ($Record.Airline.trim()) {
+        "AAL" {
+            $FlightNumber = "AA" + $Record.Flight
+            $FlightAirline = "American Airlines (AA/AAL)"
+            $AirlineID = '4'
+        }
+       "EIN" {
+            $FlightNumber = "EI" + $Record.Flight
+            $FlightAirline = "Aer Lingus (EI/EIN)"
+            $AirlineID = '260'
+        }
+        "ASA" {
+            $FlightNumber = "AS" + $Record.Flight
+            $FlightAirline = "Alaska Airlines (AS/ASA)"
+            $AirlineID = '79'
+        }
+        "AZA" {
+            $FlightNumber = "AZ" + $Record.Flight
+            $FlightAirline = "Alitalia (AZ/AZA)"
+            $AirlineID = '105'
+        }
+        "BAW" {
+            $FlightNumber = "BA" + $Record.Flight
+            $FlightAirline = "British Airways (BA/BAW)"
+            $AirlineID = '113'
+        }
+        "BCY" {
+            $FlightNumber = "WX" + $Record.Flight
+            $FlightAirline = "CityJet (WX/BCY)"
+            $AirlineID = '122'
+        }
+        "BMI" {
+            $FlightNumber = "BD" + $Record.Flight
+            $FlightAirline = "British Midland International (BD/BMI)"
+            $AirlineID = '137'
+        }
+        "AFR" {
+            $FlightNumber = "AF" + $Record.Flight   
+            $FlightAirline = "Air France (AF/AFR)"  
+            $AirlineID ='34'
+        }   
+        "ACA" {
+            $FlightNumber = "AC" + $Record.Flight
+            $FlightAirline = "Air Canada (AC/ACA)"
+            $AirlineID = '13'
+        }   
+        "COA" {
+            $FlightNumber = "CO" + $Record.Flight
+            $FlightAirline = "Continental Airlines (CO/COA)"
+            $AirlineID = '196'
+        }   
+        "DAL" {
+            $FlightNumber = "DL" + $Record.Flight
+            $FlightAirline = "Delta Airlines (DL/DAL)"
+            $AirlineID = '223'
+        }
+        "DLH" {
+            $FlightNumber = "LH" + $Record.Flight
+            $FlightAirline = "Lufthansa (LH/DLH)"
+            $AirlineID = '239'
+        }
+        "EWG" {
+            $FlightNumber = "EW" + $Record.Flight
+            $FlightAirline = "Eurowings (EW/EWG)"
+            $AirlineID = '282'
+        }
+        "ETD" {
+            $FlightNumber = "EY" + $Record.Flight
+            $FlightAirline = "Etihad Airways (EY/ETD)"
+            $AirlineID = '276'
+        }   
+        "FIN" {
+            $FlightNumber = "AY" + $Record.Flight
+            $FlightAirline = "Finnair (AY/FIN)"
+            $AirlineID = '304'
+        } 
+        "JBU" {
+            $FlightNumber = "B6" + $Record.Flight
+            $FlightAirline = "JetBlue Airways (B6/JBU)"
+            $AirlineID = '410'
+        }
+        "KLM" {
+            $FlightNumber = "KL" + $Record.Flight
+            $FlightAirline = "KLM Royal Dutch Airlines (KL/KLM)"
+            $AirlineID = '440'
+        }
+        "ICE" {
+            $FlightNumber = "FI" + $Record.Flight
+            $FlightAirline = "Icelandair (FI/ICE)"
+            $AirlineID = '381'
+        }
+        "OSR" {
+            $FlightNumber = "OS" + $Record.Flight
+            $FlightAirline = "Austrian Airlines (OS/OSR)"
+            $AirlineID = '87'
+        }
+        "QFA" {
+            $FlightNumber = "QF" + $Record.Flight
+            $FlightAirline = "Qantas (QF/QFA)"
+            $AirlineID = '631'
+        }
+        "PAI" {
+            $FlightNumber = "PI" + $Record.Flight
+            $FlightAirline = "Piedmont Airlines (PI/PAI)"
+            $AirlineID = '600'
+        }
+        "RYR" {
+            $FlightNumber = "FR" + $Record.Flight
+            $FlightAirline = "Ryanair (FR/RYR)"
+            $AirlineID = '668'
+        }
+        "SAS" {
+            $FlightNumber = "SK" + $Record.Flight
+            $FlightAirline = "Scandinavian Airlines (SK/SAS)"
+            $AirlineID = '677'
+        }
+        "SWR" {
+            $FlightNumber = "LX" + $Record.Flight
+            $FlightAirline = "Swiss International Air Lines (LX/SWR)"
+            $AirlineID = '741'
+        }
+        "UAL" {
+            $FlightNumber = "UA" + $Record.Flight
+            $FlightAirline = "United Airlines (UA/UAL)"
+            $AirlineID = '808'
+        }
+        "USA" {
+            $FlightNumber = "US" + $Record.Flight
+            $FlightAirline = "US Airways (US/USA)"
+            $AirlineID = '1401'
+        }
+        "VAU" {
+            $FlightNumber = "VA" + $Record.Flight
+            $FlightAirline = "Virgin Australia (VA/VAU)"
+            $AirlineID = '1130'
+        }
+        "VIR" {
+            $FlightNumber = "VS" + $Record.Flight
+            $FlightAirline = "Virgin Atlantic Airways (VS/VST)"
+            $AirlineID = '835'
+        }
+        Default {
+            $FlightNumber = $Record.Flight
+            $FlightAirline = $Record.Airline
+        }
+    }
+    Switch ($Record.'Aircraft Type Name'.trim()) {
+        "Airbus 300" {
+            $AircraftType = "Airbus A300 (A300)"
+            $AircraftId = '2034'
+        }
+        "Airbus 310" {
+            $AircraftType = "Airbus A310 (A310)"
+            $AircraftId = '24'
+        }   
+        "Airbus 319" {
+            $AircraftType = "Airbus A319 (A319)"
+            $AircraftId = '26'
+        }
+         "Airbus 320" {
+            $AircraftType = "Airbus A320 (A320)"
+            $AircraftId = '27'
+        }
+        "Airbus 321 Neo" {
+            $AircraftType = "Airbus A321neo (A21N)"
+            $AircraftId = '2027'
+        }
+        "Airbus 330-200" {
+            $AircraftType = "Airbus A330-200 (A332)"
+            $AircraftId = '30'
+        }
+        "Airbus 330-300" {
+            $AircraftType = "Airbus A330-300 (A333)"
+            $AircraftId = '31'
+        }
+        "BAE Avro RJ100" {
+            $AircraftType = "Avro RJ100 (ARJ1)"
+            $AircraftId = '2008'
+        }
+        "BAe 146" {
+            $AircraftType = "BAe 146-300 (BEA146)"
+            $AircraftId = '1518'
+        }
+        "B727-200" {
+            $AircraftType = "Boeing 727-200 (B722)"
+            $AircraftId = '2013'
+        }
+        "Boeing 727-200" {
+            $AircraftType = "Boeing 727-200 (B722)"
+            $AircraftId = '2013'
+        }
+        "B727" {
+            $AircraftType = "Boeing 727-200 (B722)"
+            $AircraftId = '2013'
+        }
+        "B737-200" {
+            $AircraftType = "Boeing 737-200 (B732)"
+            $AircraftId = '225'
+        }
+        "B737-300" {
+            $AircraftType = "Boeing 737-300 (B733)"
+            $AircraftId = '226'
+        }   
+        "B737-400" {
+            $AircraftType = "Boeing 737-400 (B734)"
+            $AirlineID = '227'
+        }
+        "Boeing 737-400" {
+            $AircraftType = "Boeing 737-400 (B734)"
+            $AirlineID = '227'
+        }   
+        "B737-500" {
+            $AircraftType = "Boeing 737-500 (B735)"
+            $AircraftId = '228'
+        }
+        "B737-600" {
+            $AircraftType = "Boeing 737-600 (B736)"
+            $AircraftId = '229'
+        }   
+        "Boeing 737-700" {
+            $AircraftType = "Boeing 737-700 (B737)"
+            $AircraftId = '230'
+        }   
+        "Boeing 737-800" {
+            $AircraftType = "Boeing 737-800 (B738)"
+            $AircraftId = '231'
+        }
+        "B747-100" {
+            $AircraftType = "Boeing 747-100 (B741)"
+            $AircraftId = '234'
+        }   
+        "B747-236" {
+            $AircraftType = "Boeing 747-200 (B742)"
+            $AircraftId  = '236'
+        }
+        "B747-400" {
+            $AircraftType = "Boeing 747-400 (B744)"
+            $AircraftId = '237'
+        }
+         "B757" {
+            $AircraftType = "Boeing 757-200 (B752)"
+            $AircraftId = '241'
+        }
+        "B757-200" {
+            $AircraftType = "Boeing 757-200 (B752)"
+            $AircraftId = '241'
+        }
+        "Boeing 767-200" {
+            $AircraftType = "Boeing 767-200 (B762)"
+            $AircraftId = '243'
+        }   
+        "Boeing 767-300" {
+            $AircraftType = "Boeing 767-300 (B763)"
+            $AircraftId = '244'
+        }   
+        "Boeing 777-200" {
+            $AircraftType = "Boeing 777-200 (B772)"
+            $AircraftId = '246'
+        }
+        "Concorde" {
+            $AircraftType = "Concorde (CONC)"
+        }
+        "Dash 8" {
+            $AircraftType = "De Havilland Canada Dash 8-400 (DH4)"
+        }
+        "Embraer 120" {
+            $AircraftType = "Embraer EMB 120 Brasilia (EMB120)"
+        }
+        "Embraer 145" {
+            $AircraftType = "Embraer ERJ 145 (ERJ145)"
+            $AircraftId = '653'
+        }   
+        "Fokker 100" {
+            $AircraftType = "Fokker 100 (F100)"
+            $AircraftId = '710'
+        }
+        "Fokker 50" {
+            $AircraftType = "Fokker 50 (F50)"
+            $AircraftId = '732'
+        }
+        "Fokker F28" {
+            $AircraftType = "Fokker F28 Fellowship (F28)"
+            $AircraftId = '726'
+        }
+        "Jet-410" {
+            $AircraftType = "Bombardier CRJ-100/200 (CRJ2)"
+            $AircraftId = '528'
+        }
+        "Lockheed Tristar" {
+            $AircraftType = "Lockheed L-1011 TriStar (L101)"
+            $AircraftId = '223'
+        }
+        "McDonnell Douglas-800" {
+            $AircraftType = "McDonnell Douglas MD-80 (MD80)"
+            $AircraftId = '1184'
+        }
+        "McDonnell Douglas-81" {
+            $AircraftType = "McDonnell Douglas MD-81 (MD81)"
+            $AircraftId = '1185'
+        }
+        "McDonnell Douglas-82" {
+            $AircraftType = "McDonnell Douglas MD-82 (MD82)"
+            $AircraftId = '1186'
+        }   
+        "McDonnell Douglas-83" {
+            $AircraftType = "McDonnell Douglas MD-83 (MD83)"
+            $AircraftId = '1187'
+        }   
+        "McDonnell Douglas-87" {
+            $AircraftType = "McDonnell Douglas MD-87 (MD87)"
+            $AircraftId = '1188'
+        }   
+        "McDonnell Douglas-88" {
+            $AircraftType = "McDonnell Douglas MD-88 (MD88)"
+            $AircraftId = '1189'
+        }
+        "McDonnell Douglas-90" {
+            $AircraftType = "McDonnell Douglas MD-90 (MD90)"
+        }   
+        "McDonnell Douglas-9" {
+            $AircraftType = "McDonnell Douglas MD-90 (MD90)"
+        }
+        "Airbus 321" {
+            $AircraftType = "Airbus A321 (A321)"
+            $AircraftId = '28'
+        }
+        "ATR 42-500" {
+            $AircraftType = "ATR 42-500 (AT42)"
+            $AircraftId = '2033'
+        }
+        Default {
+            $AircraftType = $Record.'Aircraft Type Name'
+        }
+    }
+
+    $ReportLine = [PSCustomObject][Ordered]@{
+        Date                = Get-Date $Record.'Gate departure (actual)' -format yyyy-MM-dd
+        'Flight number'     = $FlightNumber
+        From                = $Record.From
+        To                  = $Record.To
+        'Dep time'          = Get-Date $Departure -format 'HH:mm:ss'
+        'Arr time'          = Get-Date $Arrival -format 'HH:mm:ss'
+        Duration            = ("{0}:{1}:{2}0" -f $Duration.Hours, $Duration.Minutes, $Duration.Seconds)
+        Airline             = $FlightAirline
+        Aircraft            = $AircraftType
+        Registration        = $Record.'Tail Number'
+        'Seat number'       = $Record.Seat
+        'Seat type'         = $SeatType
+        'Flight class'      = $FlightClass
+        'Flight reason'     = $FlightReason
+        Note                = $Record.Notes
+        Airline_id          = $AirlineID 
+        Aircraft_id         = $AircraftId
+       
+    }
+    $Report.Add($ReportLine)
+}
+
+# Code for Azure Automation runbook to enable a conditional access policy to block weekend access for a specific group, and revoke sessions for all members of that group
+# Requires Policy.ReadWrite.ConditionalAccess, Group.Read.All, User.RevokeSessions.All, and GroupMember.Read.All permissions
+Connect-MgGraph -Identity 
+
+[array]$Users = Get-MgGroupMember -GroupId (Get-MgGroup -Filter "displayName eq 'CA Block Weekend Access (France)'").Id
+# Revoke access for each member
+ForEach ($User in $Users) {
+    Try {
+        $Status = Revoke-MgUserSignInSession -UserId $User.Id -ErrorAction Stop
+        Write-Output ("Revoked access for {0}" -f $User.additionalProperties.displayName) 
+    } Catch {
+        If ($_.Exception.Message -match "temporarily") {
+            Write-Warning ("Temporarily unable to revoke access for {0}, will retry after 15 seconds" -f $User.additionalProperties.DisplayName)
+            Start-Sleep -Seconds 5
+            Revoke-MgUserSignSession -UserId $User.Id
+            Write-Output ("Revoked access for {0}" -f $User.additionalProperties.displayName)
+        } Else {
+            Write-Error ("Failed to revoke access for {0}: {1}" -f $User.additionalProperties.displayName, $_.Exception.Message)
+        }
+    }
+}
+
+# Now enable the conditional access policy to block access for this group over the weekend
+$Policy = Get-MgIdentityConditionalAccessPolicy -Filter "displayName eq 'Block Weekend Access'"
+If ($Policy) {
+    Try {
+        Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $Policy.Id -State Enabled -ErrorAction Stop
+        Write-Output "Conditional Access policy 'Block Weekend Access' is now enabled"
+    } Catch {
+        Write-Error ("Failed to enable 'Block Weekend Access' policy: {0}" -f $_.Exception.Message)
+    }
+} 
+
+# See if a site list is available to add details of each user to
+$UpdateList = $false
+$Uri = "https://office365itpros.sharepoint.com/sites/O365ExchPro"
+$SiteId = $Uri.Split('//')[1].split("/")[0] + ":/sites/" + $Uri.Split('//')[1].split("/")[2]
+$Site = Get-MgSite -SiteId $SiteId
+$List = Get-MgSiteList -SiteId $Site.Id -Filter "displayName eq 'Planner Task Burndown'"   
+If ($List) {
+    $UpdateList = $true
+}
+
+# Extract data that we want to report on 
+[array]$PlanData = $UserTasks | Where-Object {$_.Plan -eq 'MAC Tasks'}
+$NewItemParameters = @{
+	fields = @{
+	    Title                   = (New-Guid).Guid
+        Plan                    = $PlanData[0].Plan
+        UPN                     = $PlanData[0].UserEmail
+        Username                = $PlanData[0].User
+        Tasks                   = $PlanData.count
+        RunDate                 = Get-Date -Format 'dd-MMM-yyyy HH:mm'
+        Averagedaysoutstanding  = [math]::Round(($PlanData | Measure-Object -Property 'Days Outstanding' -Average).Average, 2)        
+    }
+}
+Try {
+    $NewItem = New-MgSiteListItem -SiteId $Site.Id -ListId $List.Id -BodyParameter $NewItemParameters -ErrorAction Stop
+    Write-Output ("Created new list item with ID {0}" -f $NewItem.Id)
+} Catch {
+    Write-Error ("Failed to create new list item: {0}" -f $_.Exception.Message)
+}

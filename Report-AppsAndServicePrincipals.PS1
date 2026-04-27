@@ -23,7 +23,7 @@ If ([Environment]::UserInteractive) {
     $MsgFrom = (Get-MgContext).Account    
 } Else { 
     # We're not, so likely in Azure Automation
-    Write-Output "Executing the runbook to create the last activity report for user member accounts..." 
+    Write-Output "Executing the runbook to create the last service principal and app registration report..." 
     Connect-MgGraph -Identity -NoWelcome
     # Email address to use when sending email from Azure Automation
     $MsgFrom = "no-reply@office365itpros.com"
@@ -47,10 +47,14 @@ If ($Interactive) {
 # Known Traitorware apps list - see https://huntresslabs.github.io/rogueapps/
 [array]$TraitorWareApps = "em client", "perfectdata software", "newsletter software supermailer", "cloudsponge", "rclone"
 
-# High-priority permissions that we need to flag if found in apps
+# High-priority permissions that we should flag if found in apps
 [array]$HighPriorityPermissions = "User.Read.All", "User.ReadWrite.All", "Mail.ReadWrite", "Mail.Read", "Files.Read.All", "Files.ReadWrite.All",`
-    "Calendars.ReadWrite", "Mail.Send", "User.Export.All", "Directory.Read.All", "Exchange.ManageAsApp", "Directory.ReadWrite.All", "Sites.ReadWrite.All", `
-    "Sites.Read.All", "Sites.FullControl.All", "Sites.Manage.All"
+    "Calendars.ReadWrite", "Mail.Send", "User.Export.All", "Directory.Read.All", "Exchange.ManageAsApp", "Directory.ReadWrite.All", `
+    "Sites.ReadWrite.All", "Domain.ReadWrite.All", "Sites.Read.All", "Sites.FullControl.All", "Sites.Manage.All", `
+    "Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All", "Group.ReadWrite.All", "Group.Read.All", `
+    "RoleManagement.ReadWrite.Directory", "Mail-Advanced.ReadWrite.All", "Mail-Advanced.ReadWrite.Shared"
+
+$currentDate = Get-Date
 
 Write-Output "Fetching details of app roles (permissions)"
 $GraphApp = Get-MgServicePrincipal -Filter "AppId eq '00000003-0000-0000-c000-000000000000'"
@@ -92,13 +96,24 @@ $UPNHash = @{}
 # Sometimes have multiple users with same display name, so get unique list
 [array]$UserDisplayNames = $Users | Sort-Object displayName -Unique
 ForEach ($User in $Users) {
-    $UPNHash.Add([string]$User.userPrincipalName.ToLower(), [string]$User.DisplayName.toLower())
+    $UserUpnStr = ($User.userPrincipalName -as [string])
+    $UserDisplayStr = ($User.DisplayName -as [string])
+    If (![string]::IsNullOrWhiteSpace($UserUpnStr) -and ![string]::IsNullOrWhiteSpace($UserDisplayStr)) {
+        $UpnKey = $UserUpnStr.ToLower()
+        If (!$UPNHash.ContainsKey($upnKey)) {
+            $UPNHash.Add($UpnKey, $UserDisplayStr.ToLower())
+        }
+    }
 }
 # Also trim any (xxx) suffixes from display names and add lowercase versions for matching
 ForEach ($User in $UserDisplayNames) {
-    If (!($UserHash[$User.displayName])) {
-       $UserHash.Add([string]$User.displayName.Split("(")[0].Trim().ToLower(), [string]$User.userPrincipalName.ToLower())
-    }
+    $originalDisplayName = ($User.displayName -as [string]).Trim()
+    If ([string]::IsNullOrWhiteSpace($originalDisplayName)) { continue }
+    $OriginalKey = $originalDisplayName.ToLower()
+    $ProcessedKey = ($originalDisplayName.Split('(')[0].Trim().ToLower())
+    $UserUPN = ($User.userPrincipalName -as [string]).ToLower()
+    If (!$UserHash.ContainsKey($OriginalKey)) { $UserHash.Add($OriginalKey, $UserUPN) }
+    If ($OriginalKey -ne $ProcessedKey -and !$UserHash.ContainsKey($ProcessedKey)) { $UserHash.Add($ProcessedKey, $UserUPN) }
 }
 
 Write-Host "Finding service principals..."
@@ -114,8 +129,9 @@ If (!$ServicePrincipals) {
     Write-Output ("{0} service principals found" -f $ServicePrincipals.Count)  
 }
 
+[array]$SPOHelperApps = 'e8544c39-3d08-4840-b1c0-f6c93c5abba9', '30cc345a-d9f5-4592-bc5a-3f81ee9ca7d9', '30edea6c-ee9e-4374-bd7f-7230b94badd9'
 # Remove SharePoint helper apps https://learn.microsoft.com/en-us/answers/questions/1187017/sharepoint-online-client-extensibility-web-applica
-$ServicePrincipals = $ServicePrincipals | Where-Object DisplayName -notLike "SharePoint Online Client Extensibility Web Application Principal*"
+$ServicePrincipals = $ServicePrincipals | Where-Object { $_.Id -notin $SPOHelperApps }
 
 $AppReport = [System.Collections.Generic.List[Object]]::new()
 
@@ -156,36 +172,36 @@ ForEach ($SP in $ServicePrincipals) {
     
     # Checks for potentially suspicious apps - idea from https://www.bleepingcomputer.com/news/security/find-hidden-malicious-oauth-apps-in-microsoft-365-using-cazadora/
     # Check for TraitorWare apps
-    If ($TraitorWareApps -contains $AppName.ToLower()) {
-        $TraitorWareAppWarning = "⚠️ (Potential TraitorWare App)"
+    $appNameStr = ($AppName -as [string])
+    If ($appNameStr -and ($TraitorWareApps -contains $appNameStr.ToLower())) {
+        $TraitorWareAppWarning = "[!] Potential TraitorWare App"
     }  else {
         $TraitorWareAppWarning = $null
     }
     # Flag app names composed entirely of non-alphanumeric characters
-    If ($AppName -and ($AppName -notmatch '[A-Za-z0-9]')) {
-        $NonAlnumNameWarning = "⚠️ App name contains no alphanumeric characters"
+    If ($appNameStr -and ($appNameStr -notmatch '[A-Za-z0-9]')) {
+        $NonAlnumNameWarning = "[!] App name contains no alphanumeric characters"
     } Else {
         $NonAlnumNameWarning = $null
     }
     # Check if app has "test" in the name
-    If ($AppName -and ($AppName.ToLower() -like "*test*")) {
-        $TestAppWarning = "⚠️ App name contains 'test'"
+    If ($appNameStr -and ($appNameStr.ToLower() -like "*test*")) {
+        $TestAppWarning = "[!] App name contains 'test'"
     } Else {
         $TestAppWarning = $null
     }
     # Look for ProofPoint MACT campaign 1445 https://www.proofpoint.com/us/blog/cloud-security/revisiting-mact-malicious-applications-credible-cloud-tenants
-    # “http://localhost:7823/access/” in the Redirect URIs
+    # http://localhost:7823/access/
     if ($AppRedirectUris -like "*http://localhost:7823/access/*") {
-        $MACT1445Warning = "⚠️ App has ProofPoint MACT 1445 redirect URI"
+        $MACT1445Warning = "[!] App has ProofPoint MACT 1445 redirect URI"
     } Else {
         $MACT1445Warning = $null
     }
 
     # Check for apps named after account display names or user principal names
-    If (($UserHash[$Appname]) -or ($UPNHash[$Appname])) {
-        $UserMatchWarning = "⚠️ App name matches user"
-    } ElseIf ($UserHash[$Appname.ToLower()]) {
-        $UserMatchWarning = "⚠️ App name matches user"
+    $appNameKey = ($AppName -as [string]).ToLower()
+    If ($UserHash.ContainsKey($appNameKey) -or $UPNHash.ContainsKey($appNameKey)) {
+        $UserMatchWarning = "[!] App name matches user"
     } Else {
         $UserMatchWarning = $null
     }
@@ -216,18 +232,18 @@ ForEach ($SP in $ServicePrincipals) {
     }
 
     [array]$HighPermissionsFound = @()
-    # Check the permissions against high-priority list
     ForEach ($Permission in $Permissions) {
-        If ($Permission -in $HighPriorityPermissions) {
+        If ($HighPriorityPermissions -contains $Permission) {
             $HighPermissionsFound += $Permission
         }
     }
+    # Check the application permissions against high-priority list
     If ($HighPermissionsFound) {
-        $HighPermissionsFoundOutput = "⚠️ High-priority permissions: " + ($HighPermissionsFound -join ", ")
+        $HighPermissionsFoundOutput = "[!] High-priority permissions: " + ($HighPermissionsFound -join ", ")
     } Else {
         $HighPermissionsFoundOutput = $null
     }
-
+            
     # Get delegated (OAuth2) permission grants
     [array]$OAuth2PermissionsOutput = $null;  [array]$OAuth2PermissionGrants = $null
     [array]$OAuth2PermissionGrants = Get-MgServicePrincipalOauth2PermissionGrant -ServicePrincipalId $SP.Id
@@ -252,8 +268,14 @@ ForEach ($SP in $ServicePrincipals) {
             $AppTenantName = $TenantName 
         } Else {
             $LookUpId = $SP.AppOwnerOrganizationId.toString()
-            $ExternalTenantData = Find-MgTenantRelationshipTenantInformationByTenantId -TenantId $LookUpId
-            $AppTenantName = $ExternalTenantData.DisplayName 
+            Try {
+                $ExternalTenantData = Find-MgTenantRelationshipTenantInformationByTenantId -TenantId $LookUpId -ErrorAction Stop
+                $AppTenantName = $ExternalTenantData.DisplayName
+            } Catch {
+                $err = $_
+                $AppTenantName = 'Unknown'
+                Write-Warning "Could not retrieve tenant details for $LookUpId : $($err.Exception.Message)"
+            }
         }
     }
 
@@ -275,12 +297,19 @@ ForEach ($SP in $ServicePrincipals) {
 
     # Find service principal last sign-in activity
     $DaysSinceLastSignIn = $null; $SPLastActivityDateTime = $null
-    $SPLastSignInDateTime = $SpSignInHash[$SP.AppId]
+    $SPLastSignInDateTime = if ($SpSignInHash.ContainsKey($SP.AppId)) { $SpSignInHash[$SP.AppId] } else { $null }
     If ($SPLastSignInDateTime) {
-        $SPLastActivityDateTime = Get-Date $SPLastSignInDateTime -Format "dd-MMM-yyyy HH:mm"
-        $DaysSinceLastSignIn = (New-TimeSpan -Start (Get-Date $SPLastSignInDateTime) -End (Get-Date)).Days
+        Write-Verbose ("Raw sign-in date string for {0}: {1}" -f $SP.DisplayName, $SPLastSignInDateTime)
+        $signInDateParsed = Get-Date $SPLastSignInDateTime
+        Write-Verbose ("Parsed sign-in date: {0}" -f $signInDateParsed)
+        $SPLastActivityDateTime = Get-Date $signInDateParsed -Format "dd-MMM-yyyy HH:mm"
+        Write-Verbose ("Current date: {0}" -f $currentDate)
+        $TimeSpan = New-TimeSpan -Start $signInDateParsed -End $currentDate
+        Write-Verbose ("Computed timespan: {0} days" -f $TimeSpan.Days)
+        $DaysSinceLastSignIn = [int]$TimeSpan.Days
     } Else {
         $SPLastActivityDateTime = "Never"
+        Write-Verbose ("Service Principal {0} has never signed in" -f $SP.DisplayName)
     }   
 
     # Check password credentials (app secrets)
@@ -290,25 +319,25 @@ ForEach ($SP in $ServicePrincipals) {
         ForEach ($AppPwd in $App.PasswordCredentials) {
             If ($AppPwd.EndDateTime -gt (Get-Date).AddDays(30)) {
                 $ValidAppPwd++
-                $PasswordOutput += ("👍 App Password {0} valid. End date {1}" -f $AppPwd.Hint, (Get-Date $AppPwd.EndDateTime -Format "dd-MMM-yyyy HH:mm"))   
+                $PasswordOutput += ("[OK] App Password {0} valid. End date {1}" -f $AppPwd.Hint, (Get-Date $AppPwd.EndDateTime -Format "dd-MMM-yyyy HH:mm"))   
             } Else {
-                $PasswordOutput += ("⛔ App Password {0} EXPIRED or expiring SOON! End date {1}" -f $AppPwd.Hint, (Get-Date $AppPwd.EndDateTime -Format "dd-MMM-yyyy HH:mm"))       
+                $PasswordOutput += ("[!] App Password {0} EXPIRED or expiring SOON! End date {1}" -f $AppPwd.Hint, (Get-Date $AppPwd.EndDateTime -Format "dd-MMM-yyyy HH:mm"))       
             }
             $PasswordReportOutput = $PasswordOutput -join "; "
         }
     }
 
-      # Check X.509 cert credentials
+    # Check X.509 cert credentials
     $CertOutput = $null; $CertReportOutput = $null; [int]$ValidAppCert = 0
-      If ($App.KeyCredentials) {
+    If ($App.KeyCredentials) {
         [array]$CertOutput = @()
         ForEach ($AppCert in $App.KeyCredentials) {
             # Could add code to report on certs if needed
-            If ($AppCert.EndDateTime -lt (Get-Date).AddDays(30)) {
+            If ($AppCert.EndDateTime -gt (Get-Date).AddDays(30)) {
                 $ValidAppCert++
-                $CertOutput += ("⛔ App Cert {0} EXPIRED or expiring SOON! End date {1}" -f $AppCert.DisplayName, (Get-Date $AppCert.EndDateTime -Format "dd-MMM-yyyy HH:mm"))
+                $CertOutput += ("[OK] App Cert {0} valid. End date {1}" -f $AppCert.DisplayName, (Get-Date $AppCert.EndDateTime -Format "dd-MMM-yyyy HH:mm"))
             }  Else {  
-                $CertOutput += ("👍 App Cert {0} valid. End date {1}" -f $AppCert.DisplayName, (Get-Date $AppCert.EndDateTime -Format "dd-MMM-yyyy HH:mm"))
+                $CertOutput += ("[!] App Cert {0} EXPIRED or expiring SOON! End date {1}" -f $AppCert.DisplayName, (Get-Date $AppCert.EndDateTime -Format "dd-MMM-yyyy HH:mm"))
             }   
             $CertReportOutput = $CertOutput -join "; "
         }
@@ -330,7 +359,7 @@ ForEach ($SP in $ServicePrincipals) {
     $SPCreatedDateTimeOutput = $null
     $SPCreatedDate = Get-Date $SP.additionalProperties['createdDateTime']
     If ($SPCreatedDate -gt (Get-Date).AddDays(-10)) {
-        $SPCreatedDateTimeOutput = " ⚠️ (Newly created service principal) " + (Get-Date $SPCreatedDate -Format "dd-MMM-yyyy HH:mm") 
+        $SPCreatedDateTimeOutput = "[!] (Newly created service principal) " + (Get-Date $SPCreatedDate -Format "dd-MMM-yyyy HH:mm") 
     } Else {
         $SPCreatedDateTimeOutput = Get-Date $SPCreatedDate -Format "dd-MMM-yyyy HH:mm"
     }
@@ -344,7 +373,7 @@ ForEach ($SP in $ServicePrincipals) {
         'App Access'                    = $AccessAllowedToApp
         'App Visibility'                = $AppUserVisibility
         'Service Principal last used'   = $SPLastActivityDateTime
-        'Days since last sign-in'       = If ($DaysSinceLastSignIn) { $DaysSinceLastSignIn } Else { "Never" }
+        'Days since last sign-in'       = If ($null -ne $DaysSinceLastSignIn) { $DaysSinceLastSignIn } Else { "Never" }
         'App Passwords'                 = If ($PasswordReportOutput) { $PasswordReportOutput } Else { "No app passwords" }
         'Valid App Passwords'           = $ValidAppPwd
         'Invalid App Passwords'         = $App.PasswordCredentials.Count - $ValidAppPwd

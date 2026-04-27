@@ -1,6 +1,9 @@
 # Analyze-TeamsMeetings.PS1
 # a script to show how to use Graph APIs to analyze Teams meetings and attendance reports for the last 60 days
 # V1.0 28-May-2024
+# V2.0 9-Apr-2026  - Updated to deal with the new format of a Teams meeting URI
+
+# See https://practical365.com/teams-online-meetings-report/ for more information about the topic.
 # GitHub link: https://github.com/12Knocksinna/Office365itpros/blob/master/Analyze-TeamsMeetings.PS1
 
 # Connect to the Graph using an appId, tenantId, and certificate thumbprint
@@ -53,13 +56,13 @@ ForEach ($Organizer in $TeamsOrganizers) {
         $MeetingURL =  $Item.onlinemeeting.joinUrl.trim()
         $DecodedURL = [System.Web.HttpUtility]::UrlDecode($MeetingURL)
         $MeetingIdStart = $DecodedURL.IndexOf("19:") 
-        $MeetingIdEnd = $DecodedURL.IndexOf("thread")
+        $MeetingIdEnd =  $DecodedURL.IndexOf("thread")
         $MeetingId = $DecodedURL.Substring($MeetingIdStart, $MeetingIdEnd - $MeetingIdStart +9)
         $MeetingIdLookup = ("1*{0}*0**{1}" -f $Organizer.id, $MeetingId)
         $Base64MeetingId = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($MeetingIdLookup))
-        $Uri = ("https://graph.microsoft.com/v1.0/users/{0}/onlineMeetings/{1}" -f $Organizer.Id, $Base64MeetingId)
+        # $Uri = ("https://graph.microsoft.com/v1.0/users/{0}/onlineMeetings/{1}" -f $Organizer.Id, $Base64MeetingId)
         Try {
-            [array]$MeetingData = Invoke-MgGraphRequest -Method Get -Uri $Uri
+            [array]$MeetingData = Get-MgUserOnlineMeeting -OnlineMeetingId $Base64MeetingId -UserId $Organizer.Id -ErrorAction Stop
         } Catch {
             Write-Host ("Ran into an issue retieving information for meeting {0} (created {1})" -f $Item.subject, $Item.CreatedDateTime, $($PSItem.ToString())) -ForegroundColor Red
             Continue
@@ -74,13 +77,13 @@ ForEach ($Organizer in $TeamsOrganizers) {
             Organizer               = $DisplayName
             'Creation timestamp'    = (Get-Date $MeetingData.creationDateTime -format 'dd-MMM-yyyy HH:mm:ss')
             'Meeting start'         = (Get-Date $MeetingData.startDatetime -format 'dd-MMM-yyyy HH:mm')
-            'Meeting snd'           = (Get-Date $MeetingData.endDateTime -format 'dd-MMM-yyyy HH:mm')
+            'Meeting end'           = (Get-Date $MeetingData.endDateTime -format 'dd-MMM-yyyy HH:mm')
             'Time zone'             = $Item.originalStartTimeZone
             'Meeting duration'      = ("{0:hh\:mm\:ss}" -f $MeetingDuration)
             Subject                 = $MeetingData.subject
             'Allow presenters'      = $MeetingData.allowedpresenters
             'Lobby bypass'          = $MeetingData.lobbyBypassSettings.scope
-            'Auto admit'            = $MeetingData.autoAdmittedUsers
+            'Auto admit'            = $MeetingData.additionalProperties.autoAdmittedUsers
             'Allow recording'       = $MeetingData.allowRecording
             'Record automatically'  = $MeetingData.recordAutomatically
             'Allow chat'            = $MeetingData.allowMeetingChat
@@ -89,34 +92,55 @@ ForEach ($Organizer in $TeamsOrganizers) {
             MeetingURL              = $MeetingURL
         }
         $MeetingReport.Add($ReportLine)
-    }
-    # attempt at throttling control
-    Start-Sleep -Milliseconds 500
+    
+        # attempt at throttling control
+        Start-Sleep -Milliseconds 500
 
-    # Now get the attendance reports for the meeting
-    Write-Host "Fetching attendance reports for the meetings..."
-    $Uri = $Uri = ("https://graph.microsoft.com/v1.0/users/{0}/onlineMeetings/{1}/attendanceReports" -f $Organizer.Id, $Base64MeetingId)
-    [array]$AttendanceReports = Invoke-MgGraphRequest -Method get -Uri $Uri
-    $AttendanceReports = $AttendanceReports.value
- 
-    If ($AttendanceReports) {
-        ForEach ($AR in $AttendanceReports) {
-          
-            $AttendanceRecords = $null; $Participant = $null
-            $Uri = $Uri = ("https://graph.microsoft.com/v1.0/users/{0}/onlineMeetings/{1}/attendanceReports/{2}?`$expand=attendanceRecords" -f `
-                $Organizer.Id, $Base64MeetingId, $AR.Id)
-            [array]$AttendanceRecords = Invoke-MgGraphRequest -Method get -Uri $Uri
-            $AttendanceRecords = $AttendanceRecords.AttendanceRecords
-            ForEach ($Participant in $AttendanceRecords) {  
-                If ($Participant.identity.tenantId -eq $TenantId) {
-                    $ParticipantTenantName = $TenantName
-                } Else {
-                    $LookUpTenantId = $Participant.identity.tenantId
-                    $Uri = ("https://graph.microsoft.com/V1.0/tenantRelationships/findTenantInformationByTenantId(tenantId='{0}')" -f $LookUpTenantId)
-                    $ExternalTenantData = Invoke-MgGraphRequest -Uri $Uri -Method Get
-                    $ParticipantTenantName = $ExternalTenantData.displayName
+        # Now get the attendance reports for the meeting
+        Write-Host "Fetching attendance reports for the meetings..."
+        # $Uri = $Uri = ("https://graph.microsoft.com/v1.0/users/{0}/onlineMeetings/{1}/attendanceReports" -f $Organizer.Id, $Base64MeetingId)
+        Try {
+            [array]$AttendanceReports = Get-MgUserOnlineMeetingAttendanceReport -UserId $Organizer.Id -OnlineMeetingId $Base64MeetingId -ErrorAction Stop
+        } Catch {
+            Write-Host ("Ran into an issue retieving attendance reports for meeting {0} (created {1})" -f $Item.subject, $Item.CreatedDateTime, $($PSItem.ToString())) -ForegroundColor Red
+            Continue    
+        }
+        If ($AttendanceReports) {
+            ForEach ($AR in $AttendanceReports) {  
+                $AttendanceRecords = $null; $Participant = $null
+                # $Uri = $Uri = ("https://graph.microsoft.com/v1.0/users/{0}/onlineMeetings/{1}/attendanceReports/{2}?`$expand=attendanceRecords" -f `
+                #   $Organizer.Id, $Base64MeetingId, $AR.Id)
+                #[array]$AttendanceRecords = Invoke-MgGraphRequest -Method Get -Uri $Uri -OutputType PSObject
+                Try {
+                    $Uri = $Uri = ("https://graph.microsoft.com/v1.0/users/{0}/onlineMeetings/{1}/attendanceReports/{2}?`$expand=attendanceRecords" -f $Organizer.Id, $Base64MeetingId, $AR.Id)
+                    [array]$AttendanceRecords = Invoke-MgGraphRequest -Method Get -Uri $Uri -OutputType PSObject
+                    # Graph SDK bug in this cmdlet so we need to use a Graph request
+                    #[array]$AttendanceRecords = Get-MgUserOnlineMeetingAttendanceReportAttendanceRecord -MeetingAttendanceReportId $AR.id -OnlineMeetingId $Base64MeetingId -UserId $Organizer.Id -ExpandProperty attendanceRecords -ErrorAction Stop
+                } Catch {
+                    Write-Host ("Ran into an issue retieving attendance records for meeting {0} (created {1})" -f $Item.subject, $Item.CreatedDateTime, $($PSItem.ToString())) -ForegroundColor Red
+                    Continue    
+                }
+
+                $IndividualAttendanceRecords = $AttendanceRecords.AttendanceRecords
+                ForEach ($Participant in $IndividualAttendanceRecords) {  
+                    If ($Participant.identity.tenantId -eq $TenantId) {
+                        $ParticipantTenantName = $TenantName
+                    } Else {
+                        $LookUpTenantId = $Participant.identity.tenantId
+                        Try {
+                            $ExternalTenantData = Find-MgTenantRelationshipTenantInformationByTenantId -tenantId $LookUpTenantId -ErrorAction SilentlyContinue
+                            $ParticipantTenantName = $ExternalTenantData.displayName
+                        } Catch {
+                            $ParticipantTenantName = "Unknown"
+                        }
+                    }
                 }
                 $TimeInMeeting = [timespan]::fromseconds($Participant.totalAttendanceInSeconds)
+
+                $SingleUserCall = $false
+                If ($AR.totalParticipantCount -eq 1 -and $Participant.Id -eq $Organizer.Id) {
+                    $SingleUserCall = $true 
+                }
 
                 $ReportLine = [PSCustomObject]@{
                     MeetingId               = $AR.Id
@@ -134,12 +158,10 @@ ForEach ($Organizer in $TeamsOrganizers) {
                     TenantId                = $Participant.identity.tenantId
                     'Tenant name'           = $ParticipantTenantName
                     MatchMeetingId          = $MeetingId
+                    SingleUserCall          = If ($SingleUserCall) {"✓"} Else { "✗" }
                 }
                 $AttendanceData.Add($ReportLine)              
-            }   
-             # Add the attendee data to the overall set
-           #  $OverallMeetingAttendees += $AttendanceData   
-       
+            }         
         }
     }
 }
@@ -150,9 +172,9 @@ $RunDate = (Get-Date).ToString("dd-MMM-yyyy HH:mm:ss")
 $HtmlHead="<html>
 	   <style>
 	   BODY{font-family: Arial; font-size: 10pt;}
-	   H1{font-size: 32px; font-family: 'Segoe UI Light','Segoe UI','Lucida Grande',Verdana,Arial,Helvetica,sans-serif;}
-	   H2{font-size: 24px; font-family: 'Segoe UI Light','Segoe UI','Lucida Grande',Verdana,Arial,Helvetica,sans-serif;}
-	   H3{font-size: 20px; font-family: 'Segoe UI Light','Segoe UI','Lucida Grande',Verdana,Arial,Helvetica,sans-serif;}
+	   H1{font-size: 48px; font-family: 'Segoe UI Light','Segoe UI','Lucida Grande',Verdana,Arial,Helvetica,sans-serif;}
+	   H2{font-size: 36px; font-family: 'Segoe UI Light','Segoe UI','Lucida Grande',Verdana,Arial,Helvetica,sans-serif;}
+	   H3{font-size: 24px; font-family: 'Segoe UI Light','Segoe UI','Lucida Grande',Verdana,Arial,Helvetica,sans-serif;}
 	   TABLE{border: 1px solid black; border-collapse: collapse; font-size: 8pt;}
 	   TH{border: 1px solid #969595; background: #dddddd; padding: 5px; color: #000000;}
 	   TD{border: 1px solid #969595; padding: 5px; }
@@ -175,8 +197,9 @@ ForEach ($M in $MeetingReport) {
     $HtmlBody = $HtmlBody + $MeetingHtml
 
     # Output attendance details for the meeting
+    $SingleUserCall = $AttendanceData | Where-Object {$_.MatchMeetingId -eq $M.MeetingId} | Select-Object -First 1 -ExpandProperty SingleUserCall
     [array]$Attendees = $AttendanceData | Where-Object {$_.MatchMeetingId -eq $M.MeetingId} | Select-Object `
-       Email, DisplayName, Role, 'Join time', 'Leave time', 'Time in meeting', 'Tenant name' 
+       Email, DisplayName, Role, 'Join time', 'Leave time', 'Time in meeting', 'Tenant name'
     If ($Attendees.count -eq 0) {
         $HtmlBody = $HtmlBody + "<p>No attendance data available for this meeting</p>"
     } Else {
@@ -184,6 +207,10 @@ ForEach ($M in $MeetingReport) {
         $HtmlBody = $HtmlBody + ("<h4>Attendance details for meeting <u>{0}</u></h4><p></p>" -f $M.Subject)
         $HtmlBody = $HtmlBody + $AttendeesHTML + "<p></p>"
     }
+    If ($SingleUserCall -eq "✓") {
+        $HtmlBody = $HtmlBody + "<p><b>Note:</b> This was a single user meeting (organizer only) so the attendance report only contains information about the organizer's connection to the meeting.</p>"
+    }
+        
 }
 
 $HtmlBody = $HtmlBody + "<p>Report created: " + $RunDate + "</p>" 
