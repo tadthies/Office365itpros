@@ -1,6 +1,33 @@
 # SketchPad.PS1
 # Used for bits of PowerShell I am working on or want to note
 
+
+# Add attendees to a meeting
+
+# Define array of new attendees
+[array]$NewAttendees = @()
+# Loop through the users we want to add to the event
+ForEach ($User in $Users) {
+    # Create hash table containing attendee details
+    $NewAttendee = @{
+        EmailAddress = @{
+            Address = $User.Mail
+            Name    = $User.displayName
+        }
+        Type = "optional"   # or "required"
+    }
+    # Add the hash table to the array of new attendees
+    $NewAttendees += $NewAttendee
+}
+
+# Get current attendees for the meeting
+[array]$CurrentAttendees = $Event.Attendees
+# Combine the two arrays
+[array]$UpdatedAttendees = $CurrentAttendees + $NewAttendees
+# Update the meeting
+Update-MgUserEvent -UserId $CalendarUser.Id -EventId $Event.Id -Attendees $UpdatedAttendees
+
+
 # Get list to update metadata for the new item
 $ListId = (Get-MgSiteList -SiteId $Site.Id -Filter "DisplayName eq 'Documents'").Id
 [array]$ListItems = Get-MgSiteListItem -SiteId $Site.Id -ListId $ListId
@@ -1834,3 +1861,147 @@ Try {
 } Catch {
     Write-Error ("Failed to create new list item: {0}" -f $_.Exception.Message)
 }
+
+Write-Host ("File {0} is now archived" -f $File.Name) -ForegroundColor Red
+
+$StartDate = (Get-Date).AddDays(-180)
+$EndDate = Get-Date
+[array]$Domains = Get-AcceptedDomain | Select-Object -ExpandProperty DomainName
+$Operations = "MemberAdded"
+$RecordType = "MicrosoftTeams"
+Write-Output "Searching audit log for Microsoft Teams MemberAdded events between $StartDate and $EndDate..."
+[array]$Records = Search-UnifiedAuditLog -StartDate $StartDate -EndDate $EndDate -Formatted `
+     -SessionCommand ReturnLargeSet -ResultSize  5000 -Operations $Operations -RecordType $RecordType
+$Records = $Records | Sort-Object Identity -Unique
+If ($Records) {
+    Write-Host ("{0} audit records found for {1} operations between {2} and {3}" -f $Records.Count, $Operations, $StartDate, $EndDate)
+} Else {
+    Write-Host ("No audit records found for {0} operations between {1} and {2}" -f $Operations, $StartDate, $EndDate)
+    Break
+}   
+
+$Report = [System.Collections.Generic.List[Object]]::new()
+
+ForEach ($Rec in $Records) {    
+    $AuditData = $Rec.AuditData | ConvertFrom-Json
+    
+    If ($AuditData.CommunicationType -eq "OneOnOne") {
+        $ForeignDomain = $AuditData.ParticipantInfo.ParticipatingDomains | Where-Object {$_ -notin $Domains}
+        $ForeignTenantId = $AuditData.ParticipantInfo.ParticipatingTenantIds | Where-Object {$_ -ne $AuditData.OrganizationId}
+        $ReportLine = [PSCustomObject][Ordered]@{
+            TimeStamp       = Get-Date ($AuditData.CreationTime) -format 'dd-MMM-yyyy HH:mm'
+            User            = $AuditData.UserId
+            Operation       = $AuditData.Operation  
+            UserId          = $AuditData.UserKey
+            ChatThreadId    = $AuditData.ChatThreadId
+            MembersAdded    = $AuditData.Members.UPN -join ", "
+            HasForeignTenantUsers = $AuditData.ParticipantInfo.HasForeignTenantUsers
+            ForeignDomain = $ForeignDomain  
+            ForeignTenantId = $ForeignTenantId      
+        }
+        $Report.Add($ReportLine)
+    }
+}
+    
+$Report = $Report | Sort-Object {$_.TimeStamp -as [datetime]} -Descending
+
+$UserId = "59e09287-ac1b-4ff7-80a3-08d0d1eed939"
+$TenantId = (Get-MgOrganization).Id
+$UserInfo = @{}
+$UserData = @{}
+$UserData.Add("id", $UserId)
+$UserData.Add("tenantId", $TenantId)
+$UserInfo.Add("user", $UserData)
+
+$ChatId = "19:110ef7a6-82ac-41c0-b0d1-86d88fc566b6_59e09287-ac1b-4ff7-80a3-08d0d1eed939@unq.gbl.spaces"
+$Uri = ("https://graph.microsoft.com/beta/chats/{0}/removeAllAccessForUser" -f $ChatId)
+
+Try {
+    # Requires Chat.ReadWrite.All permission
+    Remove-MgChatAccessForUser -ChatId $ChatId -BodyParameter $UserInfo -ErrorAction Stop
+    Write-Output ("Removed user access from chat {0}" -f $ChatId)
+} Catch {
+    Write-Error ("Failed to remove user access from chat {0}: {1}" -f $ChatId, $_.Exception.Message)
+}
+
+# Code to figure out how the progress team members are making in burning out assigned tasks in Planner.
+If ($List) {
+    $UpdateList = $true
+    # Get list items and load them into a PowerShell list
+    [array]$ListItems = Get-MgSiteListItem -ListId $List.Id -SiteId $Site.Id -ExpandProperty "fields(`$select=id,title,plan,upn,username,Tasks,RunDate,Averagedaysoutstanding,ObjectId)" -PageSize 999 -All
+	
+    $ItemData = [System.Collections.Generic.List[Object]]::new()
+    ForEach ($Item in $ListItems.fields) { 
+    
+        $ReportLine = [PSCustomObject] @{ 
+            Id                     = $Item.Id
+            ItemId                 = $Item.additionalProperties.Title
+            Plan                   = $Item.additionalProperties.Plan
+            UPN                    = $Item.additionalProperties.UPN
+            UserName               = $Item.additionalProperties.Username
+            Tasks                  = $Item.additionalProperties.Tasks
+            Rundate                = $Item.additionalProperties.RunDate
+            Averagedaysoutstanding = $Item.additionalProperties.Averagedaysoutstanding
+            ObjectId               = $Item.additionalProperties.ObjectId
+        }
+        $ItemData.Add($ReportLine)
+    }
+}
+# Processing for individual users
+[array]$UserItems = $ItemData | Where-Object {$_.ObjectId -eq $Id -and $_.Plan -eq 'MAC Tasks'}
+# Add current stats for the user from Planner
+
+$CurrentData = [PSCustomObject] @{ 
+    Title                  = 'new Guid'
+    ItemId                 = '999'
+    Plan                   = $NewItemParameters.Fields['Plan']
+    UPN                    = $NewItemParameters.Fields['UPN']
+    UserName               = $NewItemParameters.Fields['Username']
+    Tasks                  = $NewItemParameters.Fields['Tasks']
+    Rundate                = $NewItemParameters.Fields['RunDate']
+    Averagedaysoutstanding = $NewItemParameters.Fields['Averagedaysoutstanding']
+    ObjectId               = $NewItemParameters.Fields['ObjectId']  
+}
+    
+$UserItems += $CurrentData
+
+
+# Role assignments report
+[array]$DirectoryRoles = Get-MgRoleManagementDirectoryRoleDefinition -All | Sort-Object DisplayName
+ForEach ($Role in $DirectoryRoles) {
+    $RoleId = $Role.Id
+    [array]$RoleMembers = Get-MgRoleManagementDirectoryRoleAssignment -Filter "roleDefinitionId eq '$RoleId'" -ExpandProperty Principal
+    If ($RoleMembers) {
+        $RoleName = $Role.DisplayName      
+        ForEach ($Member in $RoleMembers) {
+            Switch ($Member.Principal.additionalProperties["@odata.type"]) {
+                "#microsoft.graph.user" {
+                Write-Output ("{0} is a user member of the {1} role" -f $Member.Principal.additionalProperties.displayName, $RoleName) 
+            }
+                "#microsoft.graph.servicePrincipal" {
+                Write-Output ("{0} is a service principal member of the {1} role" -f $Member.Principal.additionalProperties.displayName, $RoleName)
+            }
+                "#microsoft.graph.group" {
+                Write-Output ("{0} is a group member of the {1} role" -f $Member.Principal.additionalProperties.displayName, $RoleName)
+            }
+            Default {
+                Write-Output ("A principal with ID {0} and type {1} is a member of the {2} role" -f $Member.PrincipalId, $Member.Principal.additionalProperties["@odata.type"], $RoleName)
+            }
+            }
+        }
+    }
+}
+
+ForEach ($Label in $TenantLabels) {
+    If ($Label.Sublabels) {
+        $TenantLabels += $Label.Sublabels
+    }  
+} 
+$TenantLabels = $TenantLabels | Sort-Object Id -Unique
+
+ForEach ($Label in $UserLabels) {
+    If ($Label.Parent.Id) {
+        $UserLabels += $Label.Parent
+    }  
+}
+$UserLabels = $UserLabels | Sort-Object Name -Unique

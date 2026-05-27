@@ -54,20 +54,20 @@ $htmlline3 = "<p>Have a great time and be sure to call the help desk if you need
 # Find all mailboxes created in the target period
 [datetime]$DisplayDate = $CheckDate
 Write-Host ("Finding User mailboxes created since {0}" -f (Get-Date($DisplayDate) -format g))
-$Users = (Get-ExoMailbox -Filter "WhenMailboxCreated -gt '$CheckDate'" -RecipientTypeDetails UserMailbox -ResultSize Unlimited -Properties WhenMailboxCreated | Select WhenMailboxCreated, DisplayName, UserPrincipalName, PrimarySmtpAddress)
+$Users = (Get-ExoMailbox -Filter "WhenMailboxCreated -gt '$CheckDate'" -RecipientTypeDetails UserMailbox -ResultSize Unlimited -Properties WhenMailboxCreated | Select-Object WhenMailboxCreated, DisplayName, UserPrincipalName, PrimarySmtpAddress)
 If (!($Users)) {Write-Host "No users found - exiting" ; break} Else { Write-Host $Users.Count "mailboxes found to process"}
 
 # Mail.Send can send from any user. In this example, because we're sending messages to welcome people, we look up the mailboxes on the system to
 # find one tagged as the HR admin. You can use whatever method you like as long as the result is a resolveable SMTP address. If you use an application
 # access policy to restrict access to the API, make sure this user is included.
-$MsgFrom = Get-Recipient -Filter {CustomAttribute1 -eq "HRAdmin"} | Select -ExpandProperty PrimarySmtpAddress
+$MsgFrom = Get-Recipient -Filter {CustomAttribute1 -eq "HRAdmin"} | Select-Object -ExpandProperty PrimarySmtpAddress
 
-If ($MsgFrom -eq $Null) { Write-Host "Can't find user defined as the sender for the messages - exiting!"; break}
+If ($null -eq $MsgFrom) { Write-Host "Can't find user defined as the sender for the messages - exiting!"; break}
 
 # Use the same approach to define CC recipients for the message
-$ccRecipient1 = Get-Recipient -Filter {CustomAttribute1 -eq "HRCC1"} | Select -ExpandProperty PrimarySmtpAddress
-$ccRecipient2 = Get-Recipient -Filter {CustomAttribute1 -eq "HRCC2"} | Select -ExpandProperty PrimarySmtpAddress
-If (($ccRecipient1 -eq $Null) -or ($ccRecipient2 -eq $Null)) { Write-Host "CC Recipients are not defined. Exiting!" ; break}
+$ccRecipient1 = Get-Recipient -Filter {CustomAttribute1 -eq "HRCC1"} | Select-Object -ExpandProperty PrimarySmtpAddress
+$ccRecipient2 = Get-Recipient -Filter {CustomAttribute1 -eq "HRCC2"} | Select-Object -ExpandProperty PrimarySmtpAddress
+If (($null -eq $ccRecipient1 ) -or ($null -eq $ccRecipient2)) { Write-Host "CC Recipients are not defined. Exiting!" ; break}
 Write-Host "Messages will be sent from" $MsgFrom "and CC'd to" $ccRecipient1 "and" $ccRecipient2
 
 # Define attachment to send to new users

@@ -7,9 +7,9 @@
 
 # Permissions needed to run the script:
 # - User.Read.All (to read user details)
-# - Group.Read.All (to read group details and membership)
 # - GroupMember.Read.All (to read group membership)
 # - Tasks.Read.All (to read the tasks assigned to users by an app). If running interactively, Tasks.Read is sufficient.
+# - Organizatioon.Read.All (to read organization details 
 
 # The script is intended to run as a scheduled Azure Automation runbook. Make sure that the Azure automation account has the
 # necessary permissions to run the script and access the Microsoft Graph API.
@@ -22,7 +22,7 @@
 # - Microsoft.Graph.Users.Actions (to send the email with the report)
 # - ImportExcel (optional, to generate Excel worksheets for the report attachments)
 
-[array]$RequiredScopes = "Group.Read.All", "GroupMember.Read.All", "Tasks.Read", "Mail.Send", "User.Read.All"
+[array]$RequiredScopes = "GroupMember.Read.All", "Tasks.Read", "Mail.Send", "User.Read.All", "Organization.Read.All"
 $Interactive = $false
 
 # Determine if we're interactive or not

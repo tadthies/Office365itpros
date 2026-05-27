@@ -2,12 +2,13 @@
 # A script to report the membership of all Microsoft 365 Groups in a tenant
 # V2.0 16-Jan-2023 Rewritten to remove depenxency on Azure AD and Exchange Online management module and use Microsoft Graph PowerShell SDK
 # V2.1 5-Jul-2025  Use Get-MgUserMemberOf to get group memberships instead of Graph request
-# cmdlets instead.
+# V2.2 11-May-2026 Use Get-MgUserMemberOfAsGroup instead of Get-MgUserMemberOf
+# 
 # https://github.com/12Knocksinna/Office365itpros/blob/master/ReportM365GroupMemberships.PS1
 # https://github.com/12Knocksinna/Office365itpros/blob/master/ReportM365GroupMemberships-Graph.PS1 is a version of this script that uses Graph API requests
 
 Clear-Host
-Connect-MgGraph -Scope Directory.Read.All, Group.Read.All, GroupMember.Read.All -NoWelcome
+Connect-MgGraph -Scope Organization.Read.All, GroupMember.Read.All -NoWelcome
 
 $OrgName = (Get-MgOrganization).displayName
 $Version = "2.0"
@@ -23,9 +24,9 @@ Clear-Host
 
 Write-Host "Fetching user information from Entra ID..."
 [array]$Users = Get-MgUser -Filter "assignedLicenses/`$count ne 0 and userType eq 'Member'" -ConsistencyLevel eventual `
-  -CountVariable Records -All -PageSize 999
+  -CountVariable Records -All -PageSize 500
 If (!($Users)) { 
-  Write-Host "Can't get user information from Azure AD - exiting" ; break 
+  Write-Host "Can't get user information from Entra ID - exiting" ; break 
 }
 $Users = $Users | Sort-Object DisplayName
 $S1 = Get-Date
@@ -45,9 +46,7 @@ ForEach ($User in $Users) {
   $CheckCount += $ProgDelta
   $UserType = "Tenant user"
   # Find any groups for the user
-  [array]$Groups = Get-MgUserMemberOf -UserId $User.Id -All | `
-    Where-Object {$_.AdditionalProperties.'@odata.type' -eq '#microsoft.graph.group' -and $_.additionalProperties.groupTypes -eq "unified"} | `
-    Select-Object -ExpandProperty AdditionalProperties
+  [array]$Groups = Get-MgUserMemberOfAsGroup -UserId $User.Id -All 
   
   If ($Groups) { # We found some groups for this recipient - process them
  
@@ -59,10 +58,12 @@ ForEach ($User in $Users) {
       $GroupOwnersEmail = $Owners.mail -join ", "
      
       If ($TeamsHash[$Group]) { 
-          $GroupName = $Group.DisplayName + " (** Team **)" } Else { $GroupName = $Group.DisplayName 
+        $GroupName = $Group.DisplayName + " (** Team **)"        
+      } Else { 
+        $GroupName = $Group.DisplayName 
       }
       $MemberLine = [PSCustomObject][Ordered]@{  # Write out details of the group
-         "User"              = $User.DisplayName
+         "User"             = $User.DisplayName
         UPN                 = $User.UserPrincipalName
         "User type"         = $User.UserType
         "Group Name"        = $GroupName
@@ -87,7 +88,7 @@ ForEach ($User in $Users) {
        UPN                 = $User.UserPrincipalName
        "User type"         = $UserType
        "Groups count"      = 0
-       "Member Of"           = "No groups found for user"    
+       "Member Of"         = "No groups found for user"    
    }
     $SummaryData.Add($SummaryLine) 
   } 

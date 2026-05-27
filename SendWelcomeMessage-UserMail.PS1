@@ -67,10 +67,11 @@ If (!($ModulesLoaded -match "ExchangeOnlineManagement")) {
     Write-Host "Please connect to the Exchange Online Management module and then restart the script"; break
 }
 # Now connect to the Microsoft Graph SDK for PowerShell
-Connect-MgGraph -Scope Mail.Send
+Connect-MgGraph -Scope Mail.Send, Organization.Read.All -NoWelcome
 
 # Message is from the signed-in account - change this if necessary (and you're running in app-only mode)
 $MsgFrom = (Get-MgContext).Account
+$TenantName = (Get-MgOrganization).displayName
 
 # Define some variables used to construct the HTML content in the message body
 #HTML header with styles
