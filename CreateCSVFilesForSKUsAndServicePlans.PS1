@@ -20,7 +20,7 @@ $LocalFilePath = ((New-Object -ComObject Shell.Application).Namespace('shell:Dow
 Invoke-WebRequest -Uri $DownloadFileURL -OutFile $LocalFilePath
 
 If (Test-Path -Path $LocalFilePath) {
-    Write-Host "Entra ID Prpduct Identifiers file downloaded successfully to $LocalFilePath"
+    Write-Host "Entra ID Product Identifiers file downloaded successfully to $LocalFilePath"
 } else {
     Write-Host "Failed to download the file. Script exiting"
     break
@@ -34,7 +34,7 @@ If (Test-Path -Path $LocalFilePath) {
 #select the service plans with friendly display name 
 [array]$SP_friendly = $identifiers | Select-Object Service_Plan_Id, Service_Plan_Name, Service_Plans_Included_Friendly_Names -Unique
 
-# Get prpduct subscriptions used in tenant
+# Get product subscriptions used in tenant
 [Array]$Skus = Get-MgSubscribedSku
 
 # Generate CSV of all product SKUs used in tenant
@@ -59,6 +59,9 @@ Write-Host ("The CSV files are now available as input for the licensing report s
 
 # An example script used to illustrate a concept. More information about the topic can be found in the Office 365 for IT Pros eBook https://gum.co/O365IT/
 # and/or a relevant article on https://office365itpros.com or https://www.practical365.com. See our post about the Office 365 for IT Pros repository # https://office365itpros.com/office-365-github-repository/ for information about the scripts we write.
+
+# The Automating Microsoft 365 with PowerShell eBook is available from https://o365itpros.gumroad.com/l/M365PS in EPUB and PDF format 
+# or in paperback at https://amzn.to/3L4IBmU
 
 # Do not use our scripts in production until you are satisfied that the code meets the need of your organization. Never run any code downloaded from the Internet without
 # first validating the code in a non-production environment.

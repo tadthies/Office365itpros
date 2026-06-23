@@ -23,6 +23,8 @@
 # V1.93 05-Sep-2024   Add analysis of costs by company name
 # V1.94 08-Sep-2024   Remove licenses assigned for expired subscriptions from the report
 # V1.95 03-Mar-2025   Fix issue #117 to allow script to run better without pricing information
+# V1.96 08-Jun-2026   Make sure that Excel generation of worksheets works as expected. Fixed bug that inactive user accounts
+#                     table was not being populated. Added check for licensed room mailbox accounts
 
 Function Get-LicenseCosts {
   # Function to calculate the annual costs of the licenses assigned to a user account  
@@ -52,7 +54,7 @@ Function Get-LicenseCosts {
 
 [datetime]$RunDate = Get-Date
 [string]$ReportRunDate = Get-Date ($RunDate) -format 'dd-MMM-yyyy HH:mm'
-$Version = "1.95"
+$Version = "1.96"
 
 # Default currency - can be overwritten by a value read into the $ImportSkus array
 [string]$Currency = "USD"
@@ -60,20 +62,20 @@ $Version = "1.95"
 # Connect to the Graph. This connection uses the delegated permissions and roles available to the signed-in user. The
 # signed-in account must hold a role like Exchange administrator to access user and group details.
 # See https://practical365.com/connect-microsoft-graph-powershell-sdk/ for information about connecting to the Graph.
-# In a production environment, it's best to use a registered Entra ID app to connect (app-only mode) to avoid the need for
-# the signed-in user to have any administrative roles, like Exchange administrator.
+
 Connect-MgGraph -Scope "Directory.AccessAsUser.All, Organization.Read.All, AuditLog.Read.All" -NoWelcome
 
 <#
-Add your tenant identifier here
-Alternative: Use Application ID and Secured Password for authentication (you could also pass a certificate thumbprint)
-$ApplicationId = "<applicationId>"
-$SecuredPassword = "<securedPassword>"
-$tenantID = "<tenantId>"
 
-$SecuredPasswordPassword = ConvertTo-SecureString -String $SecuredPassword -AsPlainText -Force
-$ClientSecretCredential = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $ApplicationId, $SecuredPasswordPassword
-Connect-MgGraph -TenantId $tenantID -ClientSecretCredential $ClientSecretCredential
+In a production environment, instead of signing in interactively with a tenant administrator account, create an app registration, 
+give the app consent to use the application permissions listed above and then use AppId, TenantId, and Certificate Thumbprint to authenticate in app-only mode
+
+$$AppId = 'Guid for App'
+$TenantId ='GUID for tenant'
+$Thumbprint = "thumbprint for certificate uploaded into app registration"
+
+Connect-MgGraph -AppId $AppId -TenantId $TenantId -CertificateThumbprint $Thumbprint -NoWelcome
+
 #>
 
 # This step depends on the availability of some CSV files generated to hold information about the product licenses used in the tenant and 
@@ -139,7 +141,11 @@ If (!($Users)) {
     Write-Host ("{0} Licensed user accounts found - now processing their license data..." -f $Users.Count) 
 }
 
-# These are the properties used to create analyses for.
+# Get Microsoft Places so that we can identify licensed room mailboxes in the report
+Write-Host "Finding places (room mailboxes)..."
+[array]$Places = Get-MgPlaceAsRoom -All -PageSize 500 | Sort-Object displayName
+
+# These are the properties used to create an analysis for.
 [array]$Departments = $Users.Department | Sort-Object -Unique
 [array]$Countries = $Users.Country | Sort-Object -Unique
 [array]$CostCenters = $Users.OnPremisesExtensionAttributes.($CostCenterAttribute) | Sort-Object -Unique
@@ -163,13 +169,15 @@ ForEach ($S in $CurrentSubscriptions) {
 $DuplicateSKUsAccounts = 0; $DuplicateSKULicenses = 0; $LicenseErrorCount = 0
 $Report = [System.Collections.Generic.List[Object]]::new()
 $DetailedLicenseReport = [System.Collections.Generic.List[Object]]::new()
-$i = 0
+[array]$LicensedRoomMailboxes = $null
+
 [float]$TotalUserLicenseCosts = 0
 [float]$TotalBoughtLicenseCosts = 0
 
+[int]$i = 0
 ForEach ($User in $Users) {
   $UnusedAccountWarning = "OK"; $i++; $UserCosts = 0
-  $ErrorMsg = ""; $LastLicenseChange = ""
+  $ErrorMsg = ""; $LastLicenseChange = ""; $DaysSinceLastSignIn = $null
   Write-Host ("Processing account {0} {1}/{2}" -f $User.UserPrincipalName, $i, $Users.Count)
   If ([string]::IsNullOrWhiteSpace($User.licenseAssignmentStates) -eq $False) {
     # Only process account if it has some licenses
@@ -283,13 +291,13 @@ ForEach ($User in $Users) {
       $UnlicensedAccounts++
   }
   # Figure out the last time the account signed in. This is important for detecting unused accounts
-  $LastSignIn = $User.SignInActivity.LastSignInDateTime
+  $LastSignIn = $User.SignInActivity.LastSuccessfulSignInDateTime
   $LastNonInteractiveSignIn = $User.SignInActivity.LastNonInteractiveSignInDateTime
 
   If (-not $LastSignIn -and -not $LastNonInteractiveSignIn) {
-      $DaysSinceLastSignIn = "Unknown"
+      [string]$DaysSinceLastSignIn = "Unknown"
       $UnusedAccountWarning = ("Unknown last sign-in for account")
-      $LastAccess = "Unknown"
+      [string]$LastAccess = "Unknown"
   } Else {
     # Get the newest date, if both dates contain values
     If ($LastSignIn -and $LastNonInteractiveSignIn) {
@@ -332,14 +340,22 @@ ForEach ($User in $Users) {
       $AccountStatus = "Disabled" 
   } Else {
       $AccountStatus = "Enabled"
-    }
+  }
+
+  # Is this licensed account a room mailbox
+  If ($Places.DisplayName -contains $User.DisplayName) {
+      $UserDisplayName = $User.DisplayName + " (***Room Mailbox***)"
+      $LicensedRoomMailboxes += $User.DisplayName
+  } Else {
+      $UserDisplayName = $User.DisplayName
+  }
 
   If ($PricingInfoAvailable) { 
     # Output report line with pricing info
     [float]$UserCosts = Get-LicenseCosts -Licenses $UserLicenses.SkuId
     $TotalUserLicenseCosts = $TotalUserLicenseCosts + $UserCosts
     $ReportLine = [PSCustomObject][Ordered]@{  
-      User                       = $User.DisplayName
+      User                       = $UserDisplayName 
       UPN                        = $User.UserPrincipalName
       Country                    = $User.Country
       Department                 = $User.Department
@@ -349,9 +365,9 @@ ForEach ($User in $Users) {
       "Disabled Plans"           = $DisabledPlans.Trim() 
       "Group based licenses"     = $GroupLicensingAssignments
       "Annual License Costs"     = ("{0} {1}" -f $Currency, ($UserCosts.toString('F2')))
-      "Last license change"      = $LastLicenseChange
+      "Last license change"      = If ($null -ne $LastLicenseChange) { Get-Date $LastLicenseChange -format 'dd-MMM-yyyy HH:mm' } Else { "N/A" }
       "Account created"          = $AccountCreatedDate
-      "Last Signin"              = $LastAccess
+      "Last Signin"              = If ($null -ne $LastAccess -and $LastAccess -ne "Unknown") { Get-Date $LastAccess -Format 'dd-MMM-yyyy HH:mm' } Else { $null }
       "Days since last signin"   = $DaysSinceLastSignIn
       "Duplicates detected"      = $DuplicateWarningReport
       Status                     = $UnusedAccountWarning
@@ -362,7 +378,7 @@ ForEach ($User in $Users) {
   } Else { 
     # No pricing information
     $ReportLine = [PSCustomObject][Ordered]@{  
-      User                       = $User.DisplayName
+      User                       = $UserDisplayName
       UPN                        = $User.UserPrincipalName
       Country                    = $User.Country
       Department                 = $User.Department
@@ -371,15 +387,15 @@ ForEach ($User in $Users) {
       "Direct assigned licenses" = $LicenseInfo
       "Disabled Plans"           = $DisabledPlans.Trim() 
       "Group based licenses"     = $GroupLicensingAssignments
-      "Last license change"      = $LastLicenseChange
+      "Last license change"      = If ($null -ne $LastLicenseChange) { Get-Date $LastLicenseChange -format 'dd-MMM-yyyy HH:mm' } Else { "N/A" }
       "Account created"          = $AccountCreatedDate
-      "Last Signin"              = $LastAccess
-      "Days since last signin"   = $DaysSinceLastSignIn
+      "Last Signin"              = If ($null -ne $LastAccess -and $LastAccess -ne "Unknown") { Get-Date $LastAccess -Format 'dd-MMM-yyyy HH:mm' } 
       "Duplicates detected"      = $DuplicateWarningReport
       Status                     = $UnusedAccountWarning
       "Account status"           = $AccountStatus
     }
   }  
+ 
   $Report.Add($ReportLine)
 
   # Populate the detailed license assignment report
@@ -567,7 +583,10 @@ If ($PricingInfoAvailable) {
     $CompanyAnalysisHTML =  "<p>" + $CompanyAnalysisHTML + "</p>" + $CompanyHTMLFooter
 } 
 
-# Inactive user accounts - these are accounts that have never signed in or whose last sign-in was more than 60 days ago  $InactiveUserAccounts = $Report | Where-Object {($_."Days since last signin" -ge 60) -or ($_.'Days since last signin' -eq "Unknown")}
+# Inactive user accounts - these are accounts that have never signed in or whose last sign-in was more than 60 days ago  
+$InactiveUserAccounts = $Report | Where-Object {($_."Days since last signin" -ge 60) -or ($_.'Days since last signin' -eq "Unknown")}
+# Strip room mailboxes from inactive accounts list (if you want to)
+$InactiveUserAccounts = $InactiveUserAccounts | Where-Object { $_.User -notin $LicensedRoomMailboxes }
 $InactiveUserAccountsCost = ("{0} {1}" -f $Currency, ('{0:N2}' -f ($InactiveUserAccounts | Measure-Object UserCosts -Sum).Sum)) # Disabled user accounts
 $DisabledUserAccounts = $Report | Where-Object { $_."Account status" -eq "disabled" }
 $DisabledUserAccountsCost = ("{0} {1}" -f $Currency, ('{0:N2}' -f ($DisabledUserAccounts | Measure-Object UserCosts -Sum).Sum)) 
@@ -717,7 +736,10 @@ $HTMLTail = $HTMLTail +
 "<p>Count of duplicate licenses:               " + $DuplicateSKULicenses + "</p>" +
 "<p>Count of errors:                           " + $LicenseErrorCount + "</p>" +
 "<p>-----------------------------------------------------------------------------------------------------------------------------</p>"
-          
+     
+If ($LicensedRoomMailboxes.Count -gt 0) {
+  $HTMLTail = $HTMLTail + "<p>Licensed room mailboxes detected: " + ($LicensedRoomMailboxes -join ", ") + "</p>"
+}
 $HTMLTail = $HTMLTail + "<p>Microsoft 365 Licensing Report<b> " + $Version + "</b></p>"	
 $HtmlReportFile = ((New-Object -ComObject Shell.Application).Namespace('shell:Downloads').Self.Path) + "\Microsoft 365 Licensing Report.html"
 $HtmlReport = $Htmlhead + $Htmlbody1 + $HtmlSkuSeparator + $HtmlBody2 + $Htmltail
@@ -729,20 +751,23 @@ If (Get-Module ImportExcel -ListAvailable) {
   $ExcelGenerated = $True
   Import-Module ImportExcel -ErrorAction SilentlyContinue
   $ExcelOutputFile = ((New-Object -ComObject Shell.Application).Namespace('shell:Downloads').Self.Path) + "\Microsoft 365 Licensing Report.xlsx"
+  Remove-Item $ExcelOutputFile -ErrorAction SilentlyContinue
   $Report | Export-Excel -Path $ExcelOutputFile -WorksheetName "Microsoft 365 Licensing Report" -Title ("Microsoft 365 Licensing Report {0}" -f (Get-Date -format 'dd-MMM-yyyy')) -TitleBold -TableName "Microsoft365LicensingReport" 
   If ($DetailedCompanyAnalyis) {
     $DetailedExcelOutputFile = ((New-Object -ComObject Shell.Application).Namespace('shell:Downloads').Self.Path) + "\Detailed Microsoft 365 Licensing Report.xlsx"
-    $DetailedLicenseReport | Export-Excel -Path $DetailedExcelOutputFile -WorksheetName "Detailed Microsoft 365 Licensing" `
-    	  -Title ("Detailed Microsoft 365 Licensing Report {0}" -f (Get-Date -format 'dd-MMM-yyyy')) -TitleBold -TableName "DetailedMicrosoft365LicensingReport" 
+    Remove-Item $DetailedExcelOutputFile -ErrorAction SilentlyContinue
+    $DetailedLicenseReport | Export-Excel -Path $DetailedExcelOutputFile -WorksheetName "Microsoft 365 Licensing" `
+   	  -Title ("Detailed Microsoft 365 Licensing Report {0}" -f (Get-Date -format 'dd-MMM-yyyy')) -TitleBold -TableName "Microsoft365LicensingDetails" 
   }
-  } Else {
+} Else {
     $CSVOutputFile = ((New-Object -ComObject Shell.Application).Namespace('shell:Downloads').Self.Path) + "\Microsoft 365 Licensing Report.CSV"
-    $Report | Export-Csv -Path $CSVOutputFile -NoTypeInformation -Encoding Utf8
+    Remove-Item $CSVOutputFile -ErrorAction SilentlyContinue
+    $Report | Export-Csv -Path $CSVOutputFile -NoTypeInformation -Encoding Utf8 
 }
 
 Write-Host ""
-Write-Host "Microsoft 365 Licensing Report complete"
-Write-Host "---------------------------------------"
+Write-Host ("Microsoft 365 Licensing Report processing complete for {0} accounts" -f $Users.count)
+Write-Host "-------------------------------------------------------------------"
 Write-Host ""
 Write-Host ("An HTML report is available in {0}" -f $HtmlReportFile)
 If ($ExcelGenerated) {
@@ -755,6 +780,9 @@ Disconnect-MgGraph
 
 # An example script used to illustrate a concept. More information about the topic can be found in the Office 365 for IT Pros eBook https://gum.co/O365IT/
 # and/or a relevant article on https://office365itpros.com or https://www.practical365.com. See our post about the Office 365 for IT Pros repository # https://office365itpros.com/office-365-github-repository/ for information about the scripts we write.
+
+# The Automating Microsoft 365 with PowerShell eBook is available from https://o365itpros.gumroad.com/l/M365PS in EPUB and PDF format 
+# or in paperback at https://amzn.to/3L4IBmU
 
 # Do not use our scripts in production until you are satisfied that the code meets the need of your organization. Never run any code downloaded from the Internet without
 # first validating the code in a non-production environment.
